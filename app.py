@@ -138,6 +138,9 @@ div.stButton > button:active { transform:none; }
 [data-testid="stDataFrame"]:hover, [data-testid="stPlotlyChart"]:hover { border-color:var(--line-hi); }
 
 @media (prefers-reduced-motion:reduce) { .stApp,.hero,.hero::after,.dot,.block-container>div>div { animation:none !important; } *{transition:none !important;} }
+[data-testid="stSidebarNav"] {
+    display: none !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -263,7 +266,17 @@ if page == "Overview":
     b2.button("Search indicators", on_click=navigate, args=("Indicator Explorer",), use_container_width=True)
 
 elif page == "Threat Graph":
-    pick = st.selectbox("Focus on an entity", ["Show all"] + list(NODES))
+    graph_options = ["Show all"] + list(NODES)
+    saved_focus = st.session_state.get("graph_focus", "Show all")
+
+    if saved_focus not in graph_options:
+        saved_focus = "Show all"
+
+    pick = st.selectbox(
+        "Focus on an entity",
+        graph_options,
+        index=graph_options.index(saved_focus),
+    )
     sel = None if pick == "Show all" else pick
     g, d = st.columns([3, 1.3])
     with g:
@@ -279,23 +292,180 @@ elif page == "Threat Graph":
             st.markdown('<div class="panel"><span style="color:#8b919b">Pick an entity to highlight its connections and see its details.</span></div>', unsafe_allow_html=True)
 
 elif page == "Indicator Explorer":
-    q = st.text_input("Search indicator", placeholder="Enter an IP, domain or file hash")
-    res = IND[IND["Indicator"].str.contains(q, case=False, regex=False)] if q else IND
-    if q and res.empty:
-        st.markdown('<div class="panel">No indicator matches that search. Try part of an IP, domain or hash.</div>', unsafe_allow_html=True)
+    st.markdown("### Search and filter intelligence")
+    st.caption(
+        "Explore simulated indicators, inspect their risk scores, "
+        "and investigate connected entities."
+    )
+
+    # Search
+    q = st.text_input(
+        "Search indicator",
+        placeholder="Enter an IP, domain, file hash or partial name",
+        key="indicator_search",
+    )
+
+    # Filters
+    f1, f2, f3 = st.columns(3)
+
+    with f1:
+        selected_type = st.selectbox(
+            "Indicator type",
+            ["All types"] + sorted(IND["Type"].unique().tolist()),
+        )
+
+    with f2:
+        selected_risk = st.selectbox(
+            "Risk level",
+            ["All risks", "High", "Medium", "Low"],
+        )
+
+    with f3:
+        selected_cluster = st.selectbox(
+            "Cluster",
+            ["All clusters"] + sorted(IND["Cluster"].unique().tolist()),
+        )
+
+    # Apply filters
+    res = IND.copy()
+
+    if q.strip():
+        res = res[
+            res["Indicator"].str.contains(
+                q.strip(), case=False, regex=False
+            )
+        ]
+
+    if selected_type != "All types":
+        res = res[res["Type"] == selected_type]
+
+    if selected_risk != "All risks":
+        res = res[res["Risk"] == selected_risk]
+
+    if selected_cluster != "All clusters":
+        res = res[res["Cluster"] == selected_cluster]
+
+    st.divider()
+
+    # Results summary
+    r1, r2 = st.columns(2)
+    r1.metric("Matching indicators", len(res))
+    r2.metric(
+        "High risk matches",
+        int((res["Risk"] == "High").sum()),
+    )
+
+    if res.empty:
+        st.warning("No indicators match the current search and filters.")
     else:
-        a, b = st.columns([3, 1.4])
-        a.dataframe(res.sort_values("Score", ascending=False), hide_index=True, use_container_width=True, column_config=TABLE_CFG)
-        top = res.sort_values("Score", ascending=False).iloc[0]
-        gauge = go.Figure(go.Indicator(mode="gauge+number", value=int(top["Score"]),
-                          number=dict(font=dict(family="JetBrains Mono", color="#fff", size=38)),
-                          gauge=dict(axis=dict(range=[0, 100], tickcolor="#4a505a"), bar=dict(color="#e8eaed", thickness=.28),
-                                     bgcolor="#14161a", borderwidth=0,
-                                     steps=[dict(range=[0, 40], color="#1a1d22"), dict(range=[40, 75], color="#262a30"), dict(range=[75, 100], color="#343941")])))
-        gauge.update_layout(**base_layout(230))
-        with b:
-            st.markdown(f"### {top['Indicator']}")
+        res = res.sort_values("Score", ascending=False).reset_index(
+            drop=True
+        )
+
+        st.markdown("### Search results")
+
+        st.dataframe(
+            res,
+            hide_index=True,
+            use_container_width=True,
+            column_config=TABLE_CFG,
+        )
+
+        # Explicitly select an indicator instead of automatically
+        # displaying the highest scoring result.
+        options = res["Indicator"].tolist()
+
+        previous = st.session_state.get("selected_indicator")
+        default_index = (
+            options.index(previous)
+            if previous in options
+            else 0
+        )
+
+        selected = st.selectbox(
+            "Inspect indicator",
+            options,
+            index=default_index,
+            key="indicator_choice",
+        )
+
+        st.session_state["selected_indicator"] = selected
+
+        # Details for the exact selected indicator
+        row = IND.loc[IND["Indicator"] == selected].iloc[0]
+        _, _, entity_type, entity_score = NODES[selected]
+        connected = sorted(neighbours(selected))
+
+        st.divider()
+        st.markdown("### Indicator details")
+
+        details_left, details_right = st.columns([3, 2])
+
+        with details_left:
+            st.markdown(f"#### `{selected}`")
+
+            d1, d2, d3 = st.columns(3)
+            d1.metric("Risk score", int(row["Score"]) )
+            d2.metric("Risk level", row["Risk"])
+            d3.metric("Entity type", entity_type)
+
+            st.markdown("**Classification details**")
+
+            st.write(f"**Cluster:** {row['Cluster']}")
+            st.write(f"**First seen:** {row['First seen']}")
+            st.write(f"**Connected entities:** {len(connected)}")
+
+            st.markdown("**Connected entities**")
+
+            if connected:
+                for entity in connected:
+                    entity_type_connected = NODES[entity][2]
+                    entity_risk = band(NODES[entity][3])
+
+                    st.markdown(
+                        f"- `{entity}` · {entity_type_connected} · "
+                        f"{entity_risk} risk"
+                    )
+            else:
+                st.caption("No connected entities in the sample graph.")
+
+        with details_right:
+            gauge = go.Figure(
+                go.Indicator(
+                    mode="gauge+number",
+                    value=int(row["Score"]),
+                    number=dict(
+                        font=dict(
+                            family="JetBrains Mono",
+                            color="#ffffff",
+                            size=38,
+                        )
+                    ),
+                    title=dict(text="Risk score"),
+                    gauge=dict(
+                        axis=dict(range=[0, 100], tickcolor="#4a505a"),
+                        bar=dict(color="#e8eaed", thickness=0.28),
+                        bgcolor="#14161a",
+                        borderwidth=0,
+                        steps=[
+                            dict(range=[0, 40], color="#1a1d22"),
+                            dict(range=[40, 75], color="#262a30"),
+                            dict(range=[75, 100], color="#343941"),
+                        ],
+                    ),
+                )
+            )
+            gauge.update_layout(**base_layout(260))
             st.plotly_chart(gauge, use_container_width=True)
+
+        if st.button(
+            "Investigate in Threat Graph",
+            use_container_width=True,
+            type="primary",
+        ):
+            st.session_state["graph_focus"] = selected
+            st.session_state["page"] = "Threat Graph"
+            st.rerun()
 
 elif page == "Investigations":
     cols = st.columns(3)
